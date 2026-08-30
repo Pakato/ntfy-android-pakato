@@ -8,16 +8,46 @@ apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
 apply plugin: 'com.google.gms.google-services'
 
+/* Release signing credentials.
+ *
+ * Resolved from environment variables (CI) or keystore.properties (local, both gitignored).
+ * If neither is present, release builds are left unsigned so F-Droid builds still work.
+ */
+def keystorePropsFile = [
+        rootProject.file(".keystores/keystore.properties"),
+        rootProject.file("keystore.properties")
+].find { it.exists() }
+def keystoreProps = new Properties()
+if (keystorePropsFile != null) {
+    keystorePropsFile.withInputStream { keystoreProps.load(it) }
+}
+def signingValue = { String envName, String propName ->
+    System.getenv(envName) ?: keystoreProps.getProperty(propName)
+}
+def releaseStorePath = signingValue("KEYSTORE_FILE", "storeFile")
+def releaseStorePassword = signingValue("KEYSTORE_PASSWORD", "storePassword")
+def releaseKeyAlias = signingValue("KEY_ALIAS", "keyAlias")
+def releaseKeyPassword = signingValue("KEY_PASSWORD", "keyPassword")
+def hasReleaseSigning = releaseStorePath && releaseStorePassword && releaseKeyAlias &&
+        releaseKeyPassword && rootProject.file(releaseStorePath).exists()
+
+/* versionCode must strictly increase for every Play upload.
+ * CI derives it from the workflow run number; local builds keep the base value.
+ */
+def baseVersionCode = 63
+def ciRunNumber = System.getenv("GITHUB_RUN_NUMBER")
+def resolvedVersionCode = ciRunNumber ? baseVersionCode + ciRunNumber.toInteger() : baseVersionCode
+
 android {
     namespace "io.heckel.ntfy"
     compileSdkVersion 36
 
     defaultConfig {
-        applicationId "io.heckel.ntfy"
+        applicationId "com.pakato.ntfy"
         minSdkVersion 26
         targetSdkVersion 36
 
-        versionCode 63
+        versionCode resolvedVersionCode
         versionName "1.25.2"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
@@ -32,14 +62,25 @@ android {
         }
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            release {
+                storeFile rootProject.file(releaseStorePath)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
             shrinkResources false
             debuggable false
-            // DEV/TEST ONLY: Uncomment this to test the release build with a debug key.
-            //                This is required to test against the production Firebase config.
-            // signingConfig signingConfigs.debug
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
         }
         debug {
             minifyEnabled false

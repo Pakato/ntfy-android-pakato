@@ -5,6 +5,13 @@ google-services.json
 .keystores/
 .signing/
 
+# Release signing credentials (NEVER commit these)
+keystore.properties
+*.jks
+*.keystore
+play-service-account.json
+*.b64
+
 # Playground
 playground/
 

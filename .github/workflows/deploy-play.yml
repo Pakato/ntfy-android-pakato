@@ -1,0 +1,96 @@
+name: Deploy to Play Store
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      track:
+        description: "Play track to deploy to"
+        required: false
+        default: internal
+        type: choice
+        options: [internal, alpha, beta, production]
+
+# Never let two uploads race; a queued run would reuse a versionCode.
+concurrency:
+  group: deploy-play
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build and upload AAB
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # google-services.json is gitignored, so CI must supply it.
+      - name: Restore google-services.json
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          if [ -z "$GOOGLE_SERVICES_JSON_BASE64" ]; then
+            echo "::error::Secret GOOGLE_SERVICES_JSON_BASE64 is not set"
+            exit 1
+          fi
+          echo "$GOOGLE_SERVICES_JSON_BASE64" | base64 -d > app/google-services.json
+          python3 -c "import json;json.load(open('app/google-services.json'))" \
+            || { echo "::error::Decoded google-services.json is not valid JSON"; exit 1; }
+
+      - name: Restore signing keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::error::Secret KEYSTORE_BASE64 is not set"
+            exit 1
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          echo "KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+
+      - name: Build signed AAB
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: ./gradlew bundlePlayRelease --no-daemon --stacktrace
+
+      - name: Verify the AAB is actually signed
+        run: |
+          AAB=app/build/outputs/bundle/playRelease/app-play-release.aab
+          test -f "$AAB" || { echo "::error::$AAB not found"; exit 1; }
+          unzip -l "$AAB" | grep -q "META-INF/.*\.RSA\|META-INF/.*\.EC" \
+            || { echo "::error::AAB is unsigned - check the signing secrets"; exit 1; }
+          echo "Signed AAB: $(du -h "$AAB" | cut -f1)"
+
+      - name: Upload to Play Store
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: com.pakato.ntfy
+          releaseFiles: app/build/outputs/bundle/playRelease/app-play-release.aab
+          track: ${{ inputs.track || 'internal' }}
+          status: completed
+          # No whatsNewDirectory: this action expects files named "whatsnew-en-US",
+          # not fastlane's changelog/<versionCode>.txt layout. See notes below.
+
+      - name: Archive AAB
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-play-release
+          path: app/build/outputs/bundle/playRelease/*.aab
+          if-no-files-found: warn
+          retention-days: 14
